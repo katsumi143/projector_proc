@@ -1,8 +1,9 @@
-use clap::Parser;
+use clap::{ Parser, ValueEnum };
 use image::{ ImageReader, Rgba, RgbaImage };
 use std::path::Path;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
+#[command(version)]
 struct Cli {
 	#[arg(short, long)]
 	input: String,
@@ -10,8 +11,36 @@ struct Cli {
 	#[arg(short, long)]
 	destination: String,
 	
+	#[arg(short, long, default_value = "split", value_enum)]
+	mode: Mode,
+	
 	#[arg(short, long, default_value = "false")]
 	output_processed_source: bool
+}
+
+#[derive(Clone, ValueEnum)]
+enum Mode {
+	Split,
+	MergeX,
+	MergeY
+}
+
+impl Mode {
+	fn direction(&self) -> Option<[u32; 2]> {
+		match self {
+			Self::Split => None,
+			Self::MergeX => Some([1, 0]),
+			Self::MergeY => Some([0, 1])
+		}
+	}
+	
+	fn name(&self) -> &str {
+		match self {
+			Self::Split => "split",
+			Self::MergeX => "mergedX",
+			Self::MergeY => "mergedY"
+		}
+	}
 }
 
 pub const CHANNEL_LETTERS: [char; 3] = ['R', 'G', 'B'];
@@ -35,14 +64,22 @@ fn main() {
 	let height = image.height();
 	
 	let mut buffer = image.into_rgba8();
-	let pixels = buffer.enumerate_pixels_mut();
+	let mut channel_buffers: [RgbaImage; 3] = [
+		RgbaImage::new(width, height),
+		RgbaImage::new(width, height),
+		RgbaImage::new(width, height)
+	];
 	
-	let depth = 1;
-	for pixel in pixels {
+	for pixel in buffer.enumerate_pixels_mut() {
 		let data = pixel.2;
-		data[0] = clamp_spread_range(data[0], depth);
-		data[1] = clamp_spread_range(data[1], depth);
-		data[2] = clamp_spread_range(data[2], depth);
+		data[0] = clamp_spread_range(data[0], 1);
+		data[1] = clamp_spread_range(data[1], 1);
+		data[2] = clamp_spread_range(data[2], 1);
+		for i in 0..3 {
+			if data[i] == 0 {
+				channel_buffers[i].put_pixel(pixel.0, pixel.1, Rgba([0, 0, 0, 255]));
+			}
+		}
 	}
 	
 	let file_name = Path::new(&args.input).file_name().unwrap().to_str().unwrap().split('.').next().unwrap();
@@ -50,17 +87,25 @@ fn main() {
 	std::fs::create_dir_all(destination)
 		.unwrap();
 	
-	for i in 0..3 {
-		let mut buffer_1 = RgbaImage::new(width, height);
-		for pixel in buffer.enumerate_pixels() {
-			if pixel.2.0[i] == 0 {
-				buffer_1.put_pixel(pixel.0, pixel.1, Rgba([0, 0, 0, 255]));
+	if let Some(direction) = args.mode.direction() {
+		let mut merged_buffer = RgbaImage::new(width * (direction[0] * 3).max(1), height * (direction[1] * 3).max(1));
+		for i in 0..3 {
+			let offset_x = i as u32 * width * direction[0];
+			let offset_y = i as u32 * height * direction[1];
+			for (x, y, pixel) in channel_buffers[i].enumerate_pixels() {
+				merged_buffer.put_pixel(offset_x + x, offset_y + y, *pixel);
 			}
 		}
 		
-		buffer_1
-			.save(destination.join(format!("{file_name}_channel{}.png", CHANNEL_LETTERS[i])))
+		merged_buffer
+			.save(destination.join(format!("{file_name}_{}.png", args.mode.name())))
 			.unwrap();
+	} else {
+		for i in 0..3 {
+			channel_buffers[i]
+				.save(destination.join(format!("{file_name}_channel{}.png", CHANNEL_LETTERS[i])))
+				.unwrap();
+		}
 	}
 	
 	if args.output_processed_source {
